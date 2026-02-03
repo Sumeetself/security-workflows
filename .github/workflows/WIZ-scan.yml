@@ -1,0 +1,70 @@
+name: Reusable Wiz Security Scan
+
+on:
+  workflow_call:
+    inputs:
+      scan-path:
+        description: 'Path to scan'
+        required: false
+        type: string
+        default: '.'
+      policy-hits-only:
+        description: 'Show only policy violations'
+        required: false
+        type: boolean
+        default: true
+      fail-on-violation:
+        description: 'Fail pipeline on violations'
+        required: false
+        type: boolean
+        default: false
+    secrets:
+      WIZ_CLIENT_ID:
+        required: true
+      WIZ_CLIENT_SECRET:
+        required: true
+    outputs:
+      scan-status:
+        description: "Scan completion status"
+        value: ${{ jobs.wiz-scan.outputs.status }}
+
+jobs:
+  wiz-scan:
+    runs-on: ubuntu-latest
+    outputs:
+      status: ${{ steps.scan.outcome }}
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Download Wiz CLI
+        run: |
+          curl -o wizcli https://downloads.wiz.io/wizcli/latest/wizcli-linux-amd64
+          chmod +x wizcli
+          sudo mv wizcli /usr/local/bin
+      
+      - name: Authenticate to Wiz
+        run: wizcli auth --id "${{ secrets.WIZ_CLIENT_ID }}" --secret "${{ secrets.WIZ_CLIENT_SECRET }}"
+      
+      - name: Scan directory
+        id: scan
+        run: |
+          SCAN_CMD="wizcli dir scan --path ${{ inputs.scan-path }}"
+          
+          if [ "${{ inputs.policy-hits-only }}" == "true" ]; then
+            SCAN_CMD="$SCAN_CMD --policy-hits-only"
+          fi
+          
+          if [ "${{ inputs.fail-on-violation }}" == "true" ]; then
+            SCAN_CMD="$SCAN_CMD --fail-on-violation"
+          fi
+          
+          $SCAN_CMD --output wiz-results.json --output-format json
+      
+      - name: Upload scan results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: wiz-scan-results-${{ github.run_id }}
+          path: wiz-results.json
