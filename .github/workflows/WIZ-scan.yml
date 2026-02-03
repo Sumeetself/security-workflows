@@ -8,13 +8,13 @@ on:
         required: false
         type: string
         default: '.'
-      policy-hits-only:
-        description: 'Show only policy violations'
+      fail-on-critical:
+        description: 'Fail on critical vulnerabilities'
         required: false
         type: boolean
         default: true
-      fail-on-violation:
-        description: 'Fail pipeline on violations'
+      fail-on-high:
+        description: 'Fail on high vulnerabilities'
         required: false
         type: boolean
         default: false
@@ -23,48 +23,69 @@ on:
         required: true
       WIZ_CLIENT_SECRET:
         required: true
-    outputs:
-      scan-status:
-        description: "Scan completion status"
-        value: ${{ jobs.wiz-scan.outputs.status }}
 
 jobs:
   wiz-scan:
     runs-on: ubuntu-latest
-    outputs:
-      status: ${{ steps.scan.outcome }}
     
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Full history for better analysis
       
       - name: Download Wiz CLI
         run: |
+          echo "Downloading Wiz CLI..."
           curl -o wizcli https://downloads.wiz.io/wizcli/latest/wizcli-linux-amd64
           chmod +x wizcli
           sudo mv wizcli /usr/local/bin
+          wizcli version
       
       - name: Authenticate to Wiz
-        run: wizcli auth --id "${{ secrets.WIZ_CLIENT_ID }}" --secret "${{ secrets.WIZ_CLIENT_SECRET }}"
+        run: |
+          echo "Authenticating to Wiz..."
+          wizcli auth --id "${{ secrets.WIZ_CLIENT_ID }}" --secret "${{ secrets.WIZ_CLIENT_SECRET }}"
       
-      - name: Scan directory
+      - name: Run Wiz Security Scan
         id: scan
         run: |
+          echo "Scanning ${{ inputs.scan-path }} for vulnerabilities..."
+          
           SCAN_CMD="wizcli dir scan --path ${{ inputs.scan-path }}"
+          SCAN_CMD="$SCAN_CMD --policy-hits-only"
+          SCAN_CMD="$SCAN_CMD --output wiz-results.json"
+          SCAN_CMD="$SCAN_CMD --output-format json"
           
-          if [ "${{ inputs.policy-hits-only }}" == "true" ]; then
-            SCAN_CMD="$SCAN_CMD --policy-hits-only"
-          fi
-          
-          if [ "${{ inputs.fail-on-violation }}" == "true" ]; then
+          if [ "${{ inputs.fail-on-critical }}" == "true" ] || [ "${{ inputs.fail-on-high }}" == "true" ]; then
             SCAN_CMD="$SCAN_CMD --fail-on-violation"
           fi
           
-          $SCAN_CMD --output wiz-results.json --output-format json
+          echo "Running: $SCAN_CMD"
+          $SCAN_CMD || echo "SCAN_FAILED=true" >> $GITHUB_ENV
       
-      - name: Upload scan results
+      - name: Display Scan Summary
+        if: always()
+        run: |
+          echo "### Wiz Security Scan Results" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          if [ -f wiz-results.json ]; then
+            echo "Scan completed. Check artifacts for detailed results." >> $GITHUB_STEP_SUMMARY
+          else
+            echo "⚠️ Scan results not found" >> $GITHUB_STEP_SUMMARY
+          fi
+      
+      - name: Upload Scan Results
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: wiz-scan-results-${{ github.run_id }}
+          name: wiz-scan-results-${{ github.event.pull_request.number || github.run_number }}
           path: wiz-results.json
+          retention-days: 30
+      
+      - name: Fail if vulnerabilities found
+        if: env.SCAN_FAILED == 'true'
+        run: |
+          echo "❌ Security vulnerabilities detected. Please review the scan results."
+          exit 1
